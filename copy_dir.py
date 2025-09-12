@@ -2,7 +2,6 @@ import getpass
 import os
 import re
 import threading
-import shutil
 import paramiko
 from tqdm import tqdm
 from dataclasses import dataclass
