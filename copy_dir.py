@@ -1,9 +1,54 @@
 import os
 import re
-import subprocess
+import threading
+import shutil
 import paramiko
-import tqdm
+from tqdm import tqdm
 from dataclasses import dataclass
+
+# 传输线程
+class Transfer (threading.Thread):
+    def __init__(self, name, counter, source_file, target_dir):
+        threading.Thread.__init__(self)
+        self.name = name
+        self.counter = counter
+        self.source_file = source_file
+        self.target_dir = target_dir
+    
+    def run(self):
+        # 看看你是不是本地地址
+        if is_remote_address(self.target_dir):
+            self.remote_transfer()
+        else:
+            self.local_transfer()
+
+    # 远程传输
+    def remote_transfer(self):
+        pass
+
+    # 本地传输
+    def local_transfer(self):
+        total_size = os.path.getsize(self.source_file)
+        file_name = os.path.basename(self.source_file)
+        try:
+            # 进度条
+            with tqdm(total=total_size,unit="B",unit_scale=True,desc=f"{file_name}") as prog:
+                # 源和目标文件块
+                with open(self.source_file, 'rb') as source_file, open(os.path.join(self.target_dir,file_name), 'wb') as target_file:
+                    # 读1M的块，然后写
+                    block_size = 1024*1024
+                    while True:
+                        block = source_file.read(block_size)
+                        # 写完了
+                        if not block:
+                            break
+                        target_file.write(block)
+                        # 更新进度条
+                        prog.update(len(block))
+        except Exception as e:
+            print(f"传输失败： {file_name}, {e}")
+
+
 
 # 地址的返回结构体
 @dataclass
@@ -49,41 +94,46 @@ def get_dir(type: bool) -> dir_result:
     ## 返回合法的本地地址
     return dir_result(True, False, target_dir)
 
-# 远程传输
-def remote_transfer(source_dir, target_dir):
-    pass
-
-def local_transfer(source_dir, target_dir):
-    pass
-
 # 主函数
 def main():
     tmp_dir: dir_result
     source_dir = ""
     target_dir = ""
+    files = []
+    thread_pool = []
     # 调用一下获取源地址
     while(not source_dir):
         tmp_dir = get_dir(True)
+        print(tmp_dir)
         if not tmp_dir.status:
             print(tmp_dir.info)
             tmp_dir = ""
-    source_dir = tmp_dir.info
+        else:
+            source_dir = tmp_dir.info
+    files = os.listdir(source_dir)
 
     # 再来获取目标地址
     while(not target_dir):
-        tmp_dir = get_dir(True)
+        tmp_dir = get_dir(False)
         if not tmp_dir.status:
             print(tmp_dir.info)
             tmp_dir = ""
-    target_dir = tmp_dir.info
+        else:
+            target_dir = tmp_dir.info
 
-    print(source_dir + "\n" + target_dir)
-
-    # 看看你是不是本地地址
-    if target_dir.is_remote:
-        remote_transfer(source_dir, target_dir)
-    else:
-        local_transfer(source_dir, target_dir)
+    # 每个文件生成一个传输线程
+    for i in tqdm(range(len(files))):
+        f = files[i]
+        source_file = os.path.join(source_dir, f)
+        if os.path.isdir(source_file):
+            print(f"跳过目录 {f}\n")
+        else:
+            thread = Transfer(f, i, source_file, target_dir)
+            thread_pool.append(thread)
+            thread.start()
+    
+    for thread in thread_pool:
+        thread.join()
 
     exit()
 
