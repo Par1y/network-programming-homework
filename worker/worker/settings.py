@@ -46,9 +46,10 @@ DOWNLOAD_DELAY = 1
 
 # Enable or disable downloader middlewares
 # See https://docs.scrapy.org/en/latest/topics/downloader-middleware.html
-#DOWNLOADER_MIDDLEWARES = {
-#    "worker.middlewares.WorkerDownloaderMiddleware": 543,
-#}
+# DOWNLOADER_MIDDLEWARES = {
+    # "worker.middlewares.WorkerDownloaderMiddleware": 543,
+    # 'scrapy.downloadermiddlewares.referer.RefererMiddleware': None,
+# }
 
 # Enable or disable extensions
 # See https://docs.scrapy.org/en/latest/topics/extensions.html
@@ -85,3 +86,7 @@ DOWNLOAD_DELAY = 1
 
 # Set settings whose default value is deprecated to a future-proof value
 FEED_EXPORT_ENCODING = "utf-8"
+
+SPIDER_MIDDLEWARES = {
+    'scrapy.spidermiddlewares.referer.RefererMiddleware': None,
+}
