@@ -3,10 +3,17 @@ import json
 import time
 import random
 
+###
+#  这个代码没有办法爬取套装，
+# 但是套装为什么要算作书来爬？
+# 这是豆瓣的毛病，
+# 我直接扔掉，不兼容他。
 class DoubanSpider(scrapy.Spider):
     name = "douban"
 
     async def start(self):
+        max_page = 20
+        url = 'https://read.douban.com/j/kind/'
         GRAPHQL_QUERY = """
         query getFilterWorksList($works_ids: [ID!]) {
         worksList(worksIds: $works_ids) {
@@ -67,9 +74,6 @@ class DoubanSpider(scrapy.Spider):
         }
         }
         """
-
-        max_page = 10
-        url = 'https://read.douban.com/j/kind/'
         
         for page in range(max_page):
             headers = {
@@ -116,7 +120,8 @@ class DoubanSpider(scrapy.Spider):
         data = json.loads(response.body)["list"]
         for book in data:
             book_link = "https://read.douban.com" + book["url"]
-            time.sleep(random.randint(3,5))
+            # 慢点爬，防止遭封
+            time.sleep(random.randint(1,5))
             # call爬取书籍详情页
             yield scrapy.Request(
                 url=book_link,
@@ -142,11 +147,10 @@ class DoubanSpider(scrapy.Spider):
         result["category"] = article_meta.xpath('.//p[@class="category"]//span[@itemprop="genre"]/text()').get()
 
         # 出版社 & 出版时间
-        publisher_text = article_meta.xpath('.//p[span[@class="label" and text()="出版社"]]/span[@class="labeled-text"]/text()').get()
-        # 分割 "作家出版社 / 2015-12"
-        parts = [part.strip() for part in publisher_text.split("/")]
-        result["publisher"] = parts[0] if len(parts) > 0 else ""
-        result["publish_time"] = parts[1] if len(parts) > 1 else ""
+        publisher_parts = article_meta.xpath('.//p[span[@class="label" and text()="出版社"]]/span[@class="labeled-text"]/span/text()').getall()
+        if len(publisher_parts) >= 2:
+            result["publisher"] = publisher_parts[0].strip()
+            result["publish_time"] = publisher_parts[1].strip()
 
         # 提供方
         result["provider"] = article_meta.xpath('.//p[span[@class="label" and text()="提供方"]]//a/text()').get()
@@ -171,4 +175,5 @@ class DoubanSpider(scrapy.Spider):
         for div in comments_div:
             comment.append(div.xpath('./a/text()').get())
 
-        yield result
+        if result["title"] is not None:
+            yield result
