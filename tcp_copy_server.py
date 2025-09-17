@@ -1,0 +1,122 @@
+import socket
+import time
+import json
+import hashlib
+import threading
+import os
+import logging
+
+# 日志
+logging.basicConfig(
+    level=logging.DEBUG,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S"
+)
+
+class Receive(threading.Thread):
+    def __init__(self, name, counter, dir, file, checksum, socket, block_size):
+        self.name = name
+        self.counter = counter
+        self.dir = dir
+        self.file = file
+        self.checksum = checksum
+        self.socket = socket
+        self.block_size = block_size
+    
+    def run(self):
+        # 接受数据
+        try:
+            with open(os.path.join(self.dir, self.file), 'wb') as target_file:
+                while(True):
+                    block = self.socket.recv(self.block_size)
+                    if not block:
+                        break
+                    target_file.write(block)
+                self.checksum()
+                logging.info("传输完成： {self.file}")
+        except Exception as e:
+            logging.error(f"传输失败： {self.file}, {str(e)}")
+    
+    def checksum(self):
+        sha1 = hashlib.sha1()
+        try:
+            with open(os.path.join(self.dir, self.file), 'wb') as target_file:
+                while(True):
+                    block = target_file.read(self.block_size)
+                    if not block:
+                        break
+                    sha1.update(block)
+            if self.checksum == sha1.hexdigest():
+                logging(f"文件哈希匹配 {self.file}")
+            else:
+                raise ArithmeticError(f"文件哈希不匹配，文件可能损坏 {self.file}")
+        except Exception as e:
+            logging.error(f"校验和出错 {e}")
+
+# 监听停止信号
+def user_input_thread():
+    global go
+    while True:
+        cmd = input("输入q停止：")
+        if cmd.lower() == 'q':
+            go = False
+            break
+
+def main():
+    # 启动一个网络流式套接字
+    global go
+    try:
+        c_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        host = socket.gethostname()
+        save_dir = str(input("请输入文件目录： "))
+        port = int(input("请输入端口： "))
+        link_limit = int(input("请输入最大连接数： "))
+        c_socket.bind((host, port))
+        c_socket.listen(link_limit)
+        c_socket.setblocking(False)
+    except Exception as e:
+        logging.error(f"建立套接字失败 {e}")
+    logging.info(f"套接字已建立，正在监听： {host}:{port}")
+
+    # 监听结束信号
+    stop_input = threading.Thread(target=user_input_thread)
+    stop_input.start()
+
+    # 每个连接call一个线程发送文件
+    thread_pool = []
+    go = True
+    while go:
+        try:
+            # 建立连接
+            x_socket,addr = c_socket.accept()
+            pre_data = x_socket.recv(1024)
+            u_data = json.loads(pre_data)
+            name = u_data["name"]
+            checksum = u_data["checksum"]
+            block_size = u_data["block_size"] or 1024*1024
+            thread = Receive(
+                name=name,
+                counter=len(thread_pool),
+                dir=save_dir,
+                checksum=checksum,
+                socket=x_socket,
+                block_size=block_size
+                )
+            thread_pool.append(thread)
+            thread.start()
+        except BlockingIOError:
+            time.sleep(0.1)
+            continue
+        except ConnectionResetError as e:
+            logging.error(f"与 {addr} 连接中断 {e}")
+        except TimeoutError as e:
+            logging.error(f"与 {addr} 连接超时 {e}")
+        except Exception as e:
+            logging.error(f"与 {addr} 连接故障 {e}")
+
+    # 清理
+    for t in thread_pool:
+        t.socket.close()
+
+if __name__ == "__main__":
+    main()

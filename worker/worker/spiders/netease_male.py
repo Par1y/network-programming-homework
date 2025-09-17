@@ -57,7 +57,7 @@ class ArtistSpider(scrapy.Spider):
             elif b == "发行时间：":
                 release_date = i.xpath("./text()").get()
             elif b == "发行公司：":
-                company = i.xpath("./text()").get()
+                company = i.xpath("./text()").get().strip()
             else:
                 self.log(f"专辑信息出现未定义值： {str(i)}")
         # 歌曲名
