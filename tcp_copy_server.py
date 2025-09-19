@@ -13,43 +13,40 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S"
 )
 
-class Receive(threading.Thread):
-    def __init__(self, name, counter, dir, file, checksum, socket, block_size):
+class Send(threading.Thread):
+    def __init__(self, name, counter, dir, file, socket, block_size):
         self.name = name
         self.counter = counter
         self.dir = dir
         self.file = file
-        self.checksum = checksum
         self.socket = socket
         self.block_size = block_size
     
     def run(self):
-        # 接受数据
+        # 发送数据
+        checksum = self.checksum()
+        self.socket.send(checksum)
         try:
-            with open(os.path.join(self.dir, self.file), 'wb') as target_file:
+            with open(os.path.join(self.dir, self.file), 'rb') as target_file:
                 while(True):
-                    block = self.socket.recv(self.block_size)
+                    block = target_file.read(self.block_size)
+                    self.socket.send(block)
                     if not block:
                         break
-                    target_file.write(block)
-                self.checksum()
                 logging.info("传输完成： {self.file}")
         except Exception as e:
             logging.error(f"传输失败： {self.file}, {str(e)}")
     
-    def checksum(self):
+    def checksum(self) -> str:
         sha1 = hashlib.sha1()
         try:
-            with open(os.path.join(self.dir, self.file), 'wb') as target_file:
+            with open(os.path.join(self.dir, self.file), 'rb') as target_file:
                 while(True):
                     block = target_file.read(self.block_size)
                     if not block:
                         break
                     sha1.update(block)
-            if self.checksum == sha1.hexdigest():
-                logging(f"文件哈希匹配 {self.file}")
-            else:
-                raise ArithmeticError(f"文件哈希不匹配，文件可能损坏 {self.file}")
+                return sha1.hexdigest()
         except Exception as e:
             logging.error(f"校验和出错 {e}")
 
@@ -66,14 +63,14 @@ def main():
     # 启动一个网络流式套接字
     global go
     try:
-        c_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         host = socket.gethostname()
         save_dir = str(input("请输入文件目录： "))
         port = int(input("请输入端口： "))
         link_limit = int(input("请输入最大连接数： "))
-        c_socket.bind((host, port))
-        c_socket.listen(link_limit)
-        c_socket.setblocking(False)
+        s_socket.bind((host, port))
+        s_socket.listen(link_limit)
+        s_socket.setblocking(False)
     except Exception as e:
         logging.error(f"建立套接字失败 {e}")
     logging.info(f"套接字已建立，正在监听： {host}:{port}")
@@ -88,17 +85,16 @@ def main():
     while go:
         try:
             # 建立连接
-            x_socket,addr = c_socket.accept()
-            pre_data = x_socket.recv(1024)
-            u_data = json.loads(pre_data)
+            x_socket,addr = s_socket.accept()
+            files = json(os.listdir(save_dir))
+            x_socket.send(files)
+            u_data = x_socket.recv(1024)
             name = u_data["name"]
-            checksum = u_data["checksum"]
             block_size = u_data["block_size"] or 1024*1024
-            thread = Receive(
+            thread = Send(
                 name=name,
                 counter=len(thread_pool),
                 dir=save_dir,
-                checksum=checksum,
                 socket=x_socket,
                 block_size=block_size
                 )

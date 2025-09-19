@@ -1,5 +1,4 @@
 import socket
-import time
 import json
 import hashlib
 import os
@@ -10,7 +9,7 @@ from tqdm import tqdm
 def checksum(file, block_size, checksum):
     sha1 = hashlib.sha1()
     try:
-        with open(file, 'wb') as target_file:
+        with open(file, 'rb') as target_file:
             while(True):
                 block = target_file.read(block_size)
                 if not block:
@@ -28,37 +27,35 @@ def main():
     addr = input("请输入目标服务器地址端口（host:port）： ")
     addr_split = re.split(r"[:：]", addr)
     host = addr_split[0]
-    port = addr_split[1]
+    port = int(addr_split[1])
     block_size = 1024*1024
 
     # 建立连接，获得文件列表
     try:
-        socket.connect((host, port))
-        socket.recv(1024)
-        
-        socket.send()
+        c_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        c_socket.connect((host, port))
+        pre_data = json.loads(socket.recv(1024))
+        files = pre_data["files"]
+        logging.info(f"文件列表： {files}\n")
+        file = str(input("请输入需下载文件名： "))
+        pre_json = json(block_size+file)
+        socket.send(pre_json)
+        checksum = json.loads(socket.recv(1024))
     except Exception as e:
         logging.error(f"连接失败 {e}")
 
-
-    with open(file_path):
-        try:
-            socket.send()
-        except Exception as e:
-            pass
-
     # 接受数据
     try:
-        with open(file_path, 'wb') as target_file:
+        with open(os.path.join(file_path, file), 'wb') as target_file:
             while(True):
                 block = socket.recv(block_size)
                 if not block:
                     break
                 target_file.write(block)
-            checksum()
-            logging.info("传输完成： {self.file}")
+            checksum(target_file, block_size, checksum)
+            logging.info("传输完成： {file}")
     except Exception as e:
-        logging.error(f"传输失败： {self.file}, {str(e)}")
+        logging.error(f"传输失败： {file}, {str(e)}")
 
 if __name__ == "__main__":
     main()
