@@ -15,6 +15,7 @@ logging.basicConfig(
 
 class Send(threading.Thread):
     def __init__(self, name, counter, dir, file, socket, block_size):
+        super().__init__()
         self.name = name
         self.counter = counter
         self.dir = dir
@@ -25,7 +26,7 @@ class Send(threading.Thread):
     def run(self):
         # 发送数据
         checksum = self.checksum()
-        self.socket.send(checksum)
+        self.socket.send(checksum.encode('utf-8'))
         try:
             with open(os.path.join(self.dir, self.file), 'rb') as target_file:
                 while(True):
@@ -33,7 +34,9 @@ class Send(threading.Thread):
                     self.socket.send(block)
                     if not block:
                         break
-                logging.info("传输完成： {self.file}")
+            # 告诉接收端结束了
+            self.socket.shutdown(socket.SHUT_WR)
+            logging.info(f"传输完成： {self.file}")
         except Exception as e:
             logging.error(f"传输失败： {self.file}, {str(e)}")
     
@@ -82,19 +85,21 @@ def main():
     # 每个连接call一个线程发送文件
     thread_pool = []
     go = True
+    addr = ''
     while go:
         try:
             # 建立连接
             x_socket,addr = s_socket.accept()
-            files = json(os.listdir(save_dir))
-            x_socket.send(files)
-            u_data = x_socket.recv(1024)
+            files = json.dumps(os.listdir(save_dir))
+            x_socket.send(files.encode('utf-8'))
+            u_data = json.loads(x_socket.recv(1024).decode('utf-8'))
             name = u_data["name"]
             block_size = u_data["block_size"] or 1024*1024
             thread = Send(
                 name=name,
                 counter=len(thread_pool),
                 dir=save_dir,
+                file=name,
                 socket=x_socket,
                 block_size=block_size
                 )
@@ -111,6 +116,7 @@ def main():
             logging.error(f"与 {addr} 连接故障 {e}")
 
     # 清理
+    s_socket.close()
     for t in thread_pool:
         t.socket.close()
 
