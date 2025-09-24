@@ -31,7 +31,7 @@ class Send(threading.Thread):
             with open(os.path.join(self.dir, self.file), 'rb') as target_file:
                 while(True):
                     block = target_file.read(self.block_size)
-                    self.socket.send(block)
+                    self.socket.sendall(block)
                     if not block:
                         break
             # 告诉接收端结束了
@@ -118,6 +118,7 @@ def main():
     # 清理
     s_socket.close()
     for t in thread_pool:
+        t.join()
         t.socket.close()
 
 if __name__ == "__main__":
