@@ -17,8 +17,12 @@ class RoomManager:
     def __init__(self):
         self.rooms = []
 
+    # 只用房间名
     def get_rooms(self) -> list:
-        return self.rooms
+        result = []
+        for r in self.rooms:
+            result.append(r.name)
+        return result
     
     def new_room(self, name) -> str:
         if not name:

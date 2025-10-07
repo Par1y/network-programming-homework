@@ -1,3 +1,4 @@
+import uuid
 import websockets
 import asyncio
 import aiortc
@@ -32,8 +33,10 @@ class SignalServer:
                 match typ:
                     case "connect":
                         # 客户端连接
+                        client_id = str(uuid.uuid4())
+                        self.media.register(client_id, websocket)
                         rooms = self.room.get_rooms()
-                        connect_ack = json.dumps({ "type":"connect_ack", "rooms":f"{rooms}" })
+                        connect_ack = json.dumps({ "type":"connect_ack", "rooms":f"{rooms}", "client_id": client_id })
                         await websocket.send(connect_ack)
                     case "join":
                         # 客户加入房间
@@ -53,12 +56,14 @@ class SignalServer:
                         await websocket.send(ack)
                     case "ice":
                         # 客户端ICE候选
-                        candidate = msg["candidate"]
-                        self.media.ice(candidate)
+                        client_id = msg["client_id"]
+                        candidate_json = msg["candidate"]
+                        await self.media.ice(client_id, candidate_json)
                     case "offer":
                         # 客户段媒体协商
+                        client_id = msg["client_id"]
                         sdp = msg["sdp"]
-                        answer = self.media.offer(sdp)
+                        answer = await self.media.offer(client_id, sdp)
                         ack = json.dumps({ "type": "offer", "answer": ack })
                         await websocket.send(answer)
                     case "stream":
