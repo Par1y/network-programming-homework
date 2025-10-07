@@ -1,9 +1,13 @@
 import asyncio
 
 import signal_server
+import room_manager
+import media_manager
 
 async def main():
-    signal = signal_server.SignalServer(host="localhost", port=3001)
+    room = room_manager.RoomManager()
+    media = media_manager.MediaManager(room)
+    signal = signal_server.SignalServer(room, media, host="localhost", port=3001)
     task = asyncio.create_task(signal.start())
     await asyncio.gather(task)
 
