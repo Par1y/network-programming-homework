@@ -1,10 +1,10 @@
 import uuid
 import websockets
 import asyncio
-import aiortc
 import json
-import re
 import logging
+from room_manager import RoomManager
+from media_manager import MediaManager
 
 # 日志
 logging.basicConfig(
@@ -13,18 +13,28 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S"
 )
 
-# 信令服务器
 class SignalServer:
+    """
+    信令服务器类
+    
+    只维护ws连接池
+
+    注入RoomManager、MediaManager
+    """
     def __init__(self, room, media, host="localhost", port=3000):
         self.host = host
         self.port = port
-        self.clients = set()
-        self.room = room
-        self.media = media
+        self.clients_ws = set()
+        self.room: RoomManager = room
+        self.media: MediaManager = media
 
-    # 连接处理
     async def handle_client(self, websocket):
-        self.clients.add(websocket)
+        """
+        信令服务器核心
+
+        处理客户端WS连接回调
+        """
+        self.clients_ws.add(websocket)
         try:
             async for message in websocket:
                 # 处理客户端信令
@@ -38,12 +48,30 @@ class SignalServer:
                         rooms = self.room.get_rooms()
                         connect_ack = json.dumps({ "type":"connect_ack", "rooms":f"{rooms}", "client_id": client_id })
                         await websocket.send(connect_ack)
+
                     case "join":
                         # 客户加入房间
-                        pass
+                        client_id = msg["client_id"]
+                        room_name = msg["room_name"]
+                        client = self.media.get_client_by_id(client_id)
+                        ack: str = self.room.join(client_id, room_name, client)
+                        if ack == "success":
+                            ack = json.dumps({ "type": "join_success" })
+                        else:
+                            ack = json.dumps({ "type": "join_failed", "msg": ack })
+                        await websocket.send(ack)
+
                     case "left":
                         # 客户离开房间
-                        pass
+                        client_id = msg["client_id"]
+                        room_name = msg["room_name"]
+                        ack: str = self.room.left(client_id, room_name)
+                        if ack == "success":
+                            ack = json.dumps({ "type": "left_success" })
+                        else:
+                            ack = json.dumps({ "type": "left_failed", "msg": ack })
+                        await websocket.send(ack)
+
                     case "new_room":
                         # 添加房间
                         room_name= msg["room_name"]
@@ -54,11 +82,13 @@ class SignalServer:
                         else:
                             ack = json.dumps({ "type": "new_room_failed", "msg": result })
                         await websocket.send(ack)
+
                     case "ice":
                         # 客户端ICE候选
                         client_id = msg["client_id"]
                         candidate_json = msg["candidate"]
                         await self.media.ice(client_id, candidate_json)
+
                     case "offer":
                         # 客户段媒体协商
                         client_id = msg["client_id"]
@@ -66,18 +96,22 @@ class SignalServer:
                         answer = await self.media.offer(client_id, sdp)
                         ack = json.dumps({ "type": "offer", "answer": ack })
                         await websocket.send(answer)
+
                     case "stream":
                         # 客户端请求流
                         pass
+
                     case _:
                         logging.info(f"非定义信令： {message}")
-                
+
         except websockets.ConnectionClosed:
             logging.info(f"连接已关闭： {websocket}")
-            self.clients.remove(websocket)
+            self.clients_ws.remove(websocket)
 
-    # 启动服务器
     async def start(self):
+        """
+        启动websocket信令服务器
+        """
         logging.info(f"启动websocket服务器： ws://{self.host}:{self.port}")
         async with websockets.serve(self.handle_client, self.host, self.port):
             await asyncio.Future()
