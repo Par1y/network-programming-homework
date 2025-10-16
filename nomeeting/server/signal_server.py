@@ -94,8 +94,8 @@ class SignalServer:
                         client_id = msg["client_id"]
                         sdp = msg["sdp"]
                         answer = await self.media.offer(client_id, sdp)
-                        ack = json.dumps({ "type": "offer", "answer": ack })
-                        await websocket.send(answer)
+                        ack = json.dumps({ "type": "offer", "answer": answer })
+                        await websocket.send(ack)
 
                     case "stream":
                         # 客户端请求流

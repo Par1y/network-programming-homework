@@ -52,10 +52,11 @@ class RoomManager:
         """
         加入房间
         """
-        r: Room
+        r: Room | None = None
         for room in self.rooms:
             if room_name == room.name:
                 r = room
+                break
         if r is None:
             return "房间不存在！"
         r.clients[client_id] = client
@@ -69,7 +70,7 @@ class RoomManager:
         """
         try:
             if room_name is None:
-                room_name = self.get_rooms
+                room_name = self.get_rooms()
             for room in self.rooms:
                 for name in room_name:
                     if name == room.name and client_id in room.clients:
@@ -77,8 +78,8 @@ class RoomManager:
                         logging.info(f"{client_id} 离开房间 {name}。")
             return "success"
         except Exception as e:
-            logging.warning(f"{client_id} 退出房间 {name} 出错！ {e}")
-            return f"无法退出 {name} "
+            logging.warning(f"{client_id} 退出房间 出错！ {e}")
+            return "无法退出 房间列表"
 
     def get_neighbors(self, client_id: str) -> dict:
         """

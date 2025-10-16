@@ -3,6 +3,7 @@ from dataclasses import dataclass
 import json
 import asyncio
 import logging
+from aiortc.contrib.media import MediaRelay
 
 # 日志
 logging.basicConfig(
@@ -38,6 +39,8 @@ class MediaManager:
         self.room = room
         self.clients = {}
         self.ice_servers = [{"urls": "stun:stun.nextcloud.com:443"}]  # 公共STUN服务器
+        # 用于转发单一源 track 到多个 PeerConnection
+        self.relay = MediaRelay()
 
     def register(self, client_id: str, websocket: any):
         """
@@ -45,7 +48,7 @@ class MediaManager:
         
         pc回调在这里注册
         """
-        pc = aiortc.RTCPeerConnection(self.ice_servers)
+        pc = aiortc.RTCPeerConnection()
         self.clients[client_id] = Client("", websocket, pc)
         
         @pc.on("iceconnectionstatechange")
@@ -74,7 +77,7 @@ class MediaManager:
             _task = asyncio.create_task(websocket.send(ice_msg))
 
         @pc.on("track")
-        def on_track(track: any, receiver: any):
+        def on_track(track: any):
             """
             核心
             
@@ -85,17 +88,27 @@ class MediaManager:
                 return
             clients: dict = self.room.get_neighbors(client_id)
             if clients:
-                for c_id, client in clients:
-                    if c_id == current_client:
-                        continue # 跳过自己
-                    client.pc.addTrack(track)
+                # 使用 MediaRelay 为每个邻居创建独立订阅的 track
+                for c_id, client in clients.items():
+                    # 跳过自己
+                    if c_id == client_id:
+                        continue
+                    try:
+                        rel_track = self.relay.subscribe(track)
+                        client.pc.addTrack(rel_track)
+                    except Exception:
+                        logging.exception("为邻居添加 track 失败")
 
     async def offer(self, client_id: str, sdp: any) -> str:
         """
         处理客户端offer
         """
         c = self.clients.get(client_id)
-        offer = aiortc.rtcsessiondescription(sdp=sdp, type="offer")
+        if c is None:
+            logging.warning(f"offer: 未找到 client_id={client_id}")
+            raise ValueError("client 未注册")
+
+        offer = aiortc.RTCSessionDescription(sdp=sdp, type="offer")
         await c.pc.setRemoteDescription(offer)
 
         # 生成SDP Answer
@@ -108,8 +121,31 @@ class MediaManager:
         处理客户端ICE候选
         """
         c = self.clients.get(client_id)
-        candidate = json.loads(candidate_json, object_hook=aiortc.RTCIceCandidate)
-        await c.pc.addIceCandidate(candidate)
+        if c is None:
+            logging.warning(f"ice: 未找到 client_id={client_id}")
+            return
+
+        # 解析 candidate 字符串并构造 RTCIceCandidate 对象
+        try:
+            cobj = json.loads(candidate_json)
+        except Exception:
+            logging.exception("无法解析 candidate_json")
+            return
+
+        try:
+            # 如果 candidate 字段为空（结束信令），传入 None
+            if not cobj.get("candidate"):
+                await c.pc.addIceCandidate(None)
+                return
+
+            candidate = aiortc.RTCIceCandidate(
+                candidate=cobj.get("candidate"),
+                sdpMid=cobj.get("sdpMid"),
+                sdpMLineIndex=cobj.get("sdpMLineIndex"),
+            )
+            await c.pc.addIceCandidate(candidate)
+        except Exception:
+            logging.exception("将 ICE candidate 添加到 pc 时出错")
 
     def get_client_by_id(self, client_id: str):
         """
