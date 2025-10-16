@@ -1,0 +1,78 @@
+# Byte-compiled / optimized / DLL files
+# Ignore any __pycache__ in any subdirectory
+**/__pycache__/
+__pycache__/
+*.py[cod]
+*$py.class
+
+# VS Code counter (extension cache)
+.VSCodeCounter
+
+# C extensions
+*.so
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environment
+venv/
+ENV/
+env/
+.venv/
+
+# PyCharm
+.idea/
+
+# VS Code
+.vscode/
+
+# macOS
+.DS_Store
+
+# Logs
+logs/
+*.log
+
+# Test output
+.pytest_cache/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Ignore compiled files from other languages
+*.class
+*.o
+
+# Node
+node_modules/
+
+# System
+Thumbs.db
+
+# local env files
+.env
+.env.*
+
+# Coverage
+.coverage
+htmlcov/
+
+# mypy
+.mypy_cache/
+
+# others
+*.swp
