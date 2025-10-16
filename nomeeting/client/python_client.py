@@ -4,9 +4,11 @@ import logging
 import sys
 from typing import Optional
 
+import os
 import websockets
 import aiortc
 from aiortc import RTCPeerConnection, RTCSessionDescription, RTCIceCandidate
+from aiortc import RTCConfiguration, RTCIceServer
 from aiortc.contrib.media import MediaPlayer, MediaRecorder
 from aiohttp import web
 from PIL import Image
@@ -236,7 +238,19 @@ class SignalingClient:
     def __init__(self, server_ws: str, room_name: str = "testroom"):
         self.server_ws = server_ws
         self.room_name = room_name
-        self.pc = RTCPeerConnection()
+        # 构造 RTCConfiguration, 支持通过环境变量 ICE_SERVERS 指定以逗号分隔的 URL 列表
+        env_ices = os.getenv("ICE_SERVERS")
+        if env_ices:
+            urls = [u.strip() for u in env_ices.split(",") if u.strip()]
+        else:
+            urls = [
+                "stun:stun.l.google.com:19302",
+                "stun:stun1.l.google.com:19302",
+                "stun:stun2.l.google.com:19302",
+            ]
+        ice_servers = [RTCIceServer(urls=[u]) for u in urls]
+        config = RTCConfiguration(iceServers=ice_servers)
+        self.pc = RTCPeerConnection(configuration=config)
         self.media = MediaEngine(self.pc)
         self.client_id = None
 

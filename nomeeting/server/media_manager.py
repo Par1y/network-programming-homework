@@ -1,4 +1,6 @@
 import aiortc
+import os
+from aiortc import RTCConfiguration, RTCIceServer
 from dataclasses import dataclass
 import json
 import asyncio
@@ -7,7 +9,7 @@ from aiortc.contrib.media import MediaRelay
 
 # 日志
 logging.basicConfig(
-    level=logging.DEBUG,
+    level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S"
 )
@@ -38,7 +40,19 @@ class MediaManager:
     def __init__(self, room):
         self.room = room
         self.clients = {}
-        self.ice_servers = [{"urls": "stun:stun.nextcloud.com:443"}]  # 公共STUN服务器
+        default_ices = [
+            "stun:stun.l.google.com:19302",
+            "stun:stun1.l.google.com:19302",
+            "stun:stun2.l.google.com:19302",
+            "stun:stun3.l.google.com:19302",
+            "stun:stun4.l.google.com:19302",
+            "stun:stun.voipbuster.com:3478",
+            "stun:stun.ekiga.net:3478",
+        ]
+        urls = default_ices
+
+        # 存储为 RTCIceServer 对象列表，便于创建 RTCConfiguration
+        self.ice_servers = [RTCIceServer(urls=[u]) for u in urls]
         # 用于转发单一源 track 到多个 PeerConnection
         self.relay = MediaRelay()
 
@@ -48,7 +62,14 @@ class MediaManager:
         
         pc回调在这里注册
         """
-        pc = aiortc.RTCPeerConnection()
+        # 使用预先构造的 ice server 列表创建 RTCConfiguration
+        try:
+            config = RTCConfiguration(iceServers=self.ice_servers)
+            pc = aiortc.RTCPeerConnection(configuration=config)
+        except Exception:
+            # 某些 aiortc 版本可能接受 dict 风格参数，回退到默认构造
+            logging.exception("创建 RTCPeerConnection 时使用 RTCConfiguration 失败，回退到默认构造")
+            pc = aiortc.RTCPeerConnection()
         self.clients[client_id] = Client("", websocket, pc)
         
         @pc.on("iceconnectionstatechange")
@@ -72,9 +93,21 @@ class MediaManager:
             """
             准备好了发送自己的ice候选
             """
-            candidate_json = json.dumps(candidate)
-            ice_msg = json.dumps({ "type": "ice", "client_id": client_id, "candidate": candidate_json })
-            _task = asyncio.create_task(websocket.send(ice_msg))
+            try:
+                if candidate is None:
+                    # end of candidates
+                    cand_obj = {"candidate": "", "sdpMid": None, "sdpMLineIndex": None}
+                else:
+                    cand_obj = {
+                        "candidate": getattr(candidate, "candidate", None),
+                        "sdpMid": getattr(candidate, "sdpMid", None),
+                        "sdpMLineIndex": getattr(candidate, "sdpMLineIndex", None),
+                    }
+                candidate_json = json.dumps(cand_obj)
+                ice_msg = json.dumps({ "type": "ice", "client_id": client_id, "candidate": candidate_json })
+                _task = asyncio.create_task(websocket.send(ice_msg))
+            except Exception:
+                logging.exception("发送 ICE candidate 失败")
 
         @pc.on("track")
         def on_track(track: any):
@@ -146,6 +179,19 @@ class MediaManager:
             await c.pc.addIceCandidate(candidate)
         except Exception:
             logging.exception("将 ICE candidate 添加到 pc 时出错")
+
+    async def set_answer(self, client_id: str, sdp: str):
+        """为之前 server 发起 offer 的 peer 设置远端 answer"""
+        c = self.clients.get(client_id)
+        if c is None:
+            logging.warning(f"set_answer: 未找到 client_id={client_id}")
+            return
+        try:
+            answer = aiortc.RTCSessionDescription(sdp=sdp, type="answer")
+            await c.pc.setRemoteDescription(answer)
+            logging.info(f"已为 client {client_id} 设置远端 answer")
+        except Exception:
+            logging.exception("设置远端 answer 失败")
 
     def get_client_by_id(self, client_id: str):
         """
