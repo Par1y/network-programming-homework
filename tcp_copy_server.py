@@ -67,11 +67,12 @@ def main():
     global go
     try:
         s_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        host = socket.gethostname()
+        # host = socket.gethostname()
+        # 直接监听0.0.0.0了，host不好
         save_dir = str(input("请输入文件目录： "))
         port = int(input("请输入端口： "))
         link_limit = int(input("请输入最大连接数： "))
-        s_socket.bind((host, port))
+        s_socket.bind(('0.0.0.0', port))
         s_socket.listen(link_limit)
         s_socket.setblocking(False)
     except Exception as e:
