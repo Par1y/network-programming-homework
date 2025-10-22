@@ -27,11 +27,11 @@ class Talk:
         """
         try:
             async for message in websocket:
-                print(message)
+                print("\n" + message + "\nwhat can i say: ", end="", flush=True)
         except Exception as e:
             logging.error(f"{e}")
         finally:
-            websocket.close()
+            await websocket.close()
 
     async def listen(self):
         """
@@ -66,7 +66,7 @@ class Talk:
 
 
 async def main():
-    talk = Talk(port=5600)
+    talk = Talk("0.0.0.0", port=3000)
     listen = asyncio.create_task(talk.listen())
     conn = asyncio.create_task(talk.conn())
     await asyncio.gather(listen, conn)
