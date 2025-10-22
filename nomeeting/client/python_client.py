@@ -23,7 +23,7 @@ logging.basicConfig(level=logging.INFO)
 
 
 class MediaEngine:
-    """负责本地采集与远端 track 处理（open/closed：可以通过继承或注入替换播放/录制行为）。"""
+    """WebRTC核心"""
     def __init__(self, pc: RTCPeerConnection):
         self.pc = pc
         self.player_video: Optional[MediaPlayer] = None
@@ -36,7 +36,6 @@ class MediaEngine:
 
         @pc.on("track")
         def _on_track(track):
-            # 为每条远端 track 创建 recorder（默认保存到文件），也可以替换为实时播放
             self._remote_count += 1
             idx = self._remote_count
             kind = track.kind
@@ -127,7 +126,7 @@ class MediaEngine:
                     t = asyncio.create_task(gst_playback())
                     self._background_tasks.append(t)
                 else:
-                    # 回退到 MJPEG 队列方式（浏览器展示）
+                    # 回退到 MJPEG 队列方式
                     q: asyncio.Queue[bytes] = asyncio.Queue(maxsize=10)
                     self.stream_queues[idx] = q
 
@@ -158,13 +157,8 @@ class MediaEngine:
                     self._background_tasks.append(t)
 
     def setup_local_media(self, video_device: Optional[str] = None, audio_device: Optional[str] = None):
-        """尝试创建本地采集（摄像头/麦克风），并把 track 添加到 pc。
-
-        说明：此方法执行同步初始化（MediaPlayer 构造为同步），不再为 async 函数，
-        便于在信令流程中直接调用而无需 await。
+        """尝试创建本地采集，并把 track 添加到 pc。
         """
-        # video_device: eg '/dev/video0' on Linux (format='v4l2')
-        # video 采集：优先尝试 aiortc 提供的 from_device（如果存在），否则回退到 MediaPlayer
         try:
             if hasattr(aiortc, "MediaStreamTrack") and hasattr(aiortc.MediaStreamTrack, "from_device"):
                 try:

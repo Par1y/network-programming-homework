@@ -77,7 +77,7 @@ def main():
         s_socket.setblocking(False)
     except Exception as e:
         logging.error(f"建立套接字失败 {e}")
-    logging.info(f"套接字已建立，正在监听： {host}:{port}")
+    logging.info(f"套接字已建立，正在监听： 0.0.0.0:{port}")
 
     # 监听结束信号
     stop_input = threading.Thread(target=user_input_thread)
