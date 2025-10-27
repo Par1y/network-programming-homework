@@ -40,6 +40,11 @@ class MediaManager:
     def __init__(self, room):
         self.room = room
         self.clients = {}
+        # 保存后台任务引用，防止被垃圾回收
+        self._background_tasks = []
+        # Track注册表：记录每个客户端的所有tracks
+        # 格式: { client_id: [track1, track2, ...] }
+        self.client_tracks = {}
         default_ices = [
             "stun:stun.l.google.com:19302",
             "stun:stun1.l.google.com:19302",
@@ -78,9 +83,9 @@ class MediaManager:
         @pc.on("iceconnectionstatechange")
         def on_ice_connection_change():
             if pc.iceConnectionState == "connected":
-                logging.info("ICE已连接。")
+                logging.info(f"ICE已连接 (client_id={client_id})")
             elif pc.iceConnectionState == "failed":
-                logging.warning("ICE连接失败。")
+                logging.warning(f"ICE连接失败 (client_id={client_id})")
 
         @pc.on("connectionstatechange")
         def on_connection_state_change():
@@ -98,7 +103,6 @@ class MediaManager:
             """
             try:
                 if candidate is None:
-                    # end of candidates
                     cand_obj = {"candidate": "", "sdpMid": None, "sdpMLineIndex": None}
                 else:
                     cand_obj = {
@@ -108,32 +112,78 @@ class MediaManager:
                     }
                 candidate_json = json.dumps(cand_obj)
                 ice_msg = json.dumps({ "type": "ice", "client_id": client_id, "candidate": candidate_json })
-                _task = asyncio.create_task(websocket.send(ice_msg))
+                
+                task = asyncio.create_task(websocket.send(ice_msg))
+                self._background_tasks.append(task)
             except Exception:
                 logging.exception("发送 ICE candidate 失败")
 
         @pc.on("track")
         def on_track(track: any):
             """
-            核心
-            
-            流处理
+            核心流处理
             """
+            logging.info(f"收到 track (kind={track.kind}, client_id={client_id})")
+            
             current_client = self.clients.get(client_id)
             if not current_client:
+                logging.warning(f"未找到客户端 (client_id={client_id})")
                 return
-            clients: dict = self.room.get_neighbors(client_id)
-            if clients:
-                # 使用 MediaRelay 为每个邻居创建独立订阅的 track
-                for c_id, client in clients.items():
-                    # 跳过自己
-                    if c_id == client_id:
-                        continue
-                    try:
-                        rel_track = self.relay.subscribe(track)
-                        client.pc.addTrack(rel_track)
-                    except Exception:
-                        logging.exception("为邻居添加 track 失败")
+            
+            # 将track注册到track注册表
+            if client_id not in self.client_tracks:
+                self.client_tracks[client_id] = []
+            self.client_tracks[client_id].append(track)
+            logging.info(f"客户端 {client_id} 现有 {len(self.client_tracks[client_id])} 个track")
+            
+            neighbors = self.room.get_neighbors(client_id)
+            logging.info(f"客户端 {client_id} 的邻居数量: {len(neighbors) if neighbors else 0}")
+            
+            if not neighbors:
+                logging.warning(f"客户端 {client_id} 没有邻居，track已注册但未转发")
+                return
+            
+            for neighbor_id, neighbor in neighbors.items():
+                if neighbor_id == client_id:
+                    continue
+                
+                try:
+                    rel_track = self.relay.subscribe(track)
+                    # addTrack返回RTCRtpSender，需要通过getTransceivers获取transceiver
+                    sender = neighbor.pc.addTrack(rel_track)
+                    
+                    # 获取刚添加的transceiver（最后一个）
+                    transceivers = neighbor.pc.getTransceivers()
+                    if transceivers:
+                        transceiver = transceivers[-1]
+                        # 设置direction为sendonly（服务器向客户端发送）
+                        transceiver._direction = "sendonly"
+                    
+                    logging.info(f"已转发 track 到邻居 {neighbor_id}")
+                    
+                    # 添加track后需要重新协商
+                    async def renegotiate():
+                        try:
+                            offer = await neighbor.pc.createOffer()
+                            await neighbor.pc.setLocalDescription(offer)
+                            # 等待ICE gathering完成
+                            await asyncio.sleep(1.0)
+                            
+                            offer_msg = json.dumps({
+                                "type": "offer",
+                                "client_id": neighbor_id,
+                                "sdp": offer.sdp
+                            })
+                            await neighbor.ws.send(offer_msg)
+                            logging.info(f"重新协商完成 (neighbor_id={neighbor_id})")
+                        except Exception as e:
+                            logging.warning(f"重新协商失败 (neighbor_id={neighbor_id}): {e}")
+                    
+                    task = asyncio.create_task(renegotiate())
+                    self._background_tasks.append(task)
+                    
+                except Exception:
+                    logging.exception(f"转发 track 失败 (neighbor_id={neighbor_id})")
 
     async def offer(self, client_id: str, sdp: any) -> str:
         """
@@ -147,10 +197,28 @@ class MediaManager:
         offer = aiortc.RTCSessionDescription(sdp=sdp, type="offer")
         await c.pc.setRemoteDescription(offer)
 
+        # 在创建answer前检查并修复transceivers的direction
+        for i, t in enumerate(c.pc.getTransceivers()):
+            direction = getattr(t, '_direction', None)
+            
+            # 如果direction为None，尝试修复
+            if direction is None:
+                sender = getattr(t, 'sender', None)
+                if sender and sender.track:
+                    t._direction = "sendonly"
+                    logging.debug(f"修复Transceiver[{i}]的direction为sendonly")
+                else:
+                    t._direction = "recvonly"
+                    logging.debug(f"修复Transceiver[{i}]的direction为recvonly")
+
         # 生成SDP Answer
-        answer = await c.pc.createAnswer()
-        await c.pc.setLocalDescription(answer)
-        return answer.sdp
+        try:
+            answer = await c.pc.createAnswer()
+            await c.pc.setLocalDescription(answer)
+            return answer.sdp
+        except Exception as e:
+            logging.error(f"客户端 {client_id} 创建answer失败: {e}")
+            raise
 
     async def ice(self, client_id: str, candidate_json: str):
         """
@@ -192,9 +260,9 @@ class MediaManager:
         try:
             answer = aiortc.RTCSessionDescription(sdp=sdp, type="answer")
             await c.pc.setRemoteDescription(answer)
-            logging.info(f"已为 client {client_id} 设置远端 answer")
+            logging.info(f"已设置远端 answer (client_id={client_id})")
         except Exception:
-            logging.exception("设置远端 answer 失败")
+            logging.exception(f"设置远端 answer 失败 (client_id={client_id})")
 
     def get_client_by_id(self, client_id: str):
         """
@@ -202,3 +270,90 @@ class MediaManager:
         """
         if client_id in self.clients:
             return self.clients[client_id]
+    
+    async def subscribe_existing_tracks(self, new_client_id: str, room_name: str, room_manager):
+        """
+        新客户端加入房间时，订阅房间内已有客户端的所有tracks
+        
+        关键流程：
+        1. 从track注册表获取已有客户端的tracks
+        2. 使用MediaRelay转发这些tracks到新客户端的PeerConnection
+        3. 服务器主动发起offer，让新客户端知道有远端流可接收
+        4. 新客户端接收offer，创建answer并发回
+        
+        Args:
+            new_client_id: 新加入的客户端ID
+            room_name: 房间名称
+            room_manager: RoomManager实例，用于获取房间内的其他客户端
+        """
+        new_client = self.clients.get(new_client_id)
+        if not new_client:
+            logging.warning(f"subscribe_existing_tracks: 未找到新客户端 {new_client_id}")
+            return
+        
+        # 获取房间内的所有邻居（不包括自己）
+        neighbors = room_manager.get_neighbors(new_client_id)
+        
+        if not neighbors:
+            logging.info(f"房间 {room_name} 中没有其他客户端，无需订阅已有流")
+            return
+        
+        logging.info(f"客户端 {new_client_id} 开始订阅房间 {room_name} 中的已有流，邻居数量: {len(neighbors)}")
+        
+        # 遍历所有邻居，从track注册表获取他们的tracks并转发给新客户端
+        tracks_added = 0
+        for neighbor_id, neighbor in neighbors.items():
+            if neighbor_id == new_client_id:
+                continue
+            
+            # 从track注册表获取邻居的tracks
+            neighbor_tracks = self.client_tracks.get(neighbor_id, [])
+            logging.info(f"邻居 {neighbor_id} 有 {len(neighbor_tracks)} 个已注册的track")
+            
+            if not neighbor_tracks:
+                continue
+            
+            # 遍历邻居的所有track并转发
+            for track in neighbor_tracks:
+                try:
+                    # 使用relay订阅track并添加到新客户端的PeerConnection
+                    rel_track = self.relay.subscribe(track)
+                    
+                    # addTrack返回RTCRtpSender，需要通过getTransceivers获取transceiver
+                    sender = new_client.pc.addTrack(rel_track)
+                    
+                    # 获取刚添加的transceiver（最后一个）并设置direction
+                    transceivers = new_client.pc.getTransceivers()
+                    if transceivers:
+                        transceiver = transceivers[-1]
+                        transceiver._direction = "sendonly"
+                    
+                    tracks_added += 1
+                    logging.info(f"已将邻居 {neighbor_id} 的 {track.kind} track 转发给新客户端 {new_client_id}")
+                except Exception as e:
+                    logging.exception(f"转发邻居 {neighbor_id} 的 track 失败: {e}")
+        
+        # 如果添加了tracks，服务器需要主动发起offer让客户端知道有远端流
+        if tracks_added > 0:
+            logging.info(f"共为新客户端 {new_client_id} 添加了 {tracks_added} 个track，服务器主动发起offer")
+            
+            try:
+                # 服务器创建offer并发送给新客户端
+                offer = await new_client.pc.createOffer()
+                await new_client.pc.setLocalDescription(offer)
+                
+                # 等待ICE gathering完成
+                await asyncio.sleep(1.0)
+                
+                # 发送offer给新客户端
+                offer_msg = json.dumps({
+                    "type": "offer",
+                    "client_id": new_client_id,
+                    "sdp": offer.sdp
+                })
+                await new_client.ws.send(offer_msg)
+                logging.info(f"已向新客户端 {new_client_id} 发送offer（包含 {tracks_added} 个远端track）")
+            except Exception as e:
+                logging.exception(f"为新客户端 {new_client_id} 发起offer失败: {e}")
+        else:
+            logging.info(f"新客户端 {new_client_id} 没有需要订阅的track")

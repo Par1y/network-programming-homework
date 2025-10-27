@@ -84,18 +84,15 @@ class RoomManager:
 
     def get_neighbors(self, client_id: str) -> dict:
         """
-        找到所有邻居
+        找到所有邻居（所有加入房间内的其他客户端，支持多房间）
         """
-        # 找到所属房间
-        r = {}
+        neighbors = {}
+        # 遍历所有房间，找到客户端加入的所有房间
         for room in self.rooms:
             if client_id in room.clients:
-                # 加入所有邻居
-                for c_id, c in room.clients.items():
-                    # 去重
-                    if c_id not in r:
-                        r[c_id] = c
-        if r:
-            return r
-        else:
-            return {}
+                # 遍历当前房间的所有客户端
+                for c_id, client in room.clients.items():
+                    # 排除自己，且去重
+                    if c_id != client_id and c_id not in neighbors:
+                        neighbors[c_id] = client
+        return neighbors
