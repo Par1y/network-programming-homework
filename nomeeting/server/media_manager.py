@@ -48,6 +48,9 @@ class MediaManager:
             "stun:stun4.l.google.com:19302",
             "stun:stun.voipbuster.com:3478",
             "stun:stun.ekiga.net:3478",
+            "stun:stun.qq.com:3478",
+            "stun:stun.miwifi.com:3478",
+            "stun:stun.sipgate.net:3478",
         ]
         urls = default_ices
 

@@ -41,12 +41,13 @@ class RoomManager:
         if not name:
             return "房间名不能为空！"
         n_room = Room(name=name,clients={})
-        if n_room not in self.rooms:
-            logging.info(f"房间已创建： {name}")
-            self.rooms.append(n_room)
-            return "success"
-        else:
-            return "房间已存在！"
+        for room in self.rooms:
+            if room.name == name:
+                return "房间已存在！"
+        logging.info(f"房间已创建： {name}")
+        self.rooms.append(n_room)
+        return "success"
+            
 
     def join(self, client_id: str, room_name: str, client: Client) -> str:
         """
