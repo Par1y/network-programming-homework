@@ -1,0 +1,297 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NoMeeting 控制台</title>
+    <link rel="stylesheet" href="https://unpkg.com/antd/dist/reset.css" />
+    <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    <script src="https://unpkg.com/dayjs/dayjs.min.js"></script>
+    <script src="https://unpkg.com/antd/dist/antd.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <style>
+        .ant-layout-header {
+            background: #fff;
+            padding: 0 24px;
+            border-bottom: 1px solid #f0f0f0;
+        }
+        .logo {
+            font-size: 20px;
+            font-weight: 600;
+        }
+        .ant-layout-content {
+            padding: 24px;
+            min-height: calc(100vh - 64px - 70px);
+        }
+        .ant-layout-footer {
+            text-align: center;
+        }
+        .stream-card img {
+            width: 100%;
+            height: 100%;
+            object-fit: contain;
+            background: #000;
+        }
+        .stream-card .ant-card-body {
+            padding: 0;
+            position: relative;
+            aspect-ratio: 16 / 9;
+        }
+        .stream-placeholder {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            text-align: center;
+            color: #888;
+        }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useRef } = React;
+        const {
+            Layout,
+            Button,
+            Input,
+            Form,
+            Row,
+            Col,
+            Card,
+            Modal,
+            Spin,
+            Empty,
+            Tag,
+            message,
+            Typography,
+            Space,
+            Grid,
+        } = antd;
+        const { Header, Content, Footer } = Layout;
+        const { Title } = Typography;
+        const { useBreakpoint } = Grid;
+
+        const App = () => {
+            const [form] = Form.useForm();
+            const [connected, setConnected] = useState(false);
+            const [loading, setLoading] = useState(false);
+            const [streams, setStreams] = useState([]);
+            const [status, setStatus] = useState({ text: '未连接', color: 'default' });
+            const intervalRef = useRef(null);
+            const screens = useBreakpoint();
+
+            const handleConnect = async (values) => {
+                setLoading(true);
+                setStatus({ text: '连接中...', color: 'processing' });
+                try {
+                    const response = await fetch('/api/connect', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(values),
+                    });
+                    const data = await response.json();
+
+                    if (response.ok && data.success) {
+                        message.success('连接成功!');
+                        setConnected(true);
+                        setStatus({ text: `已连接到 ${values.room_name}`, color: 'success' });
+                        startFetchingStreams();
+                    } else {
+                        throw new Error(data.message || '连接失败');
+                    }
+                } catch (error) {
+                    message.error(`连接失败: ${error.message}`);
+                    setStatus({ text: '连接失败', color: 'error' });
+                } finally {
+                    setLoading(false);
+                }
+            };
+
+            const handleDisconnect = async () => {
+                setLoading(true);
+                setStatus({ text: '断开中...', color: 'processing' });
+                try {
+                    const response = await fetch('/api/disconnect', { method: 'POST' });
+                    const data = await response.json();
+                    if (response.ok && data.success) {
+                        message.success('已断开连接');
+                        setConnected(false);
+                        setStreams([]);
+                        setStatus({ text: '未连接', color: 'default' });
+                        if (intervalRef.current) {
+                            clearInterval(intervalRef.current);
+                            intervalRef.current = null;
+                        }
+                    } else {
+                        throw new Error(data.message || '断开连接失败');
+                    }
+                } catch (error) {
+                    message.error(`断开连接失败: ${error.message}`);
+                    // Keep status as connected if disconnect fails
+                    setStatus({ text: '断开失败', color: 'error' });
+                } finally {
+                    setLoading(false);
+                }
+            };
+            
+            const fetchStreams = async () => {
+                if (!document.hidden) { // Only fetch if tab is visible
+                    try {
+                        const response = await fetch('/api/streams');
+                        if (!response.ok) {
+                            // If API fails, maybe connection is lost
+                            if(response.status >= 500) {
+                                console.error('服务器错误，可能连接已断开');
+                                handleDisconnect(); // Attempt to clean up state
+                            }
+                            return;
+                        };
+                        const data = await response.json();
+                        if (data.success) {
+                            setStreams(data.streams || []);
+                        }
+                    } catch (error) {
+                        console.error('获取流列表失败:', error);
+                        // This might happen if the server is down, treat as disconnected
+                        handleDisconnect();
+                    }
+                }
+            };
+
+            const startFetchingStreams = () => {
+                fetchStreams(); // Initial fetch
+                if (intervalRef.current) clearInterval(intervalRef.current);
+                intervalRef.current = setInterval(fetchStreams, 5000);
+            };
+
+            useEffect(() => {
+                return () => {
+                    if (intervalRef.current) {
+                        clearInterval(intervalRef.current);
+                    }
+                };
+            }, []);
+
+            const StreamCard = ({ streamId }) => {
+                const streamUrl = `${window.location.origin}/stream/${streamId}`;
+                const [imgLoaded, setImgLoaded] = useState(false);
+                const [imgError, setImgError] = useState(false);
+
+                // Reset state when streamId changes
+                useEffect(() => {
+                    setImgLoaded(false);
+                    setImgError(false);
+                }, [streamId]);
+
+                return (
+                    <Col xs={24} sm={24} md={12} lg={8} xl={6}>
+                        <Card
+                            className="stream-card"
+                            title={`视频流 #${streamId}`}
+                            bordered={false}
+                            hoverable
+                        >
+                            {!imgLoaded && !imgError && (
+                                <div className="stream-placeholder">
+                                    <Spin />
+                                    <p>加载中...</p>
+                                </div>
+                            )}
+                            {imgError && (
+                                <div className="stream-placeholder">
+                                    <p>❌ 加载失败</p>
+                                </div>
+                            )}
+                            <img
+                                src={streamUrl}
+                                alt={`Stream ${streamId}`}
+                                style={{ display: imgLoaded && !imgError ? 'block' : 'none' }}
+                                onLoad={() => setImgLoaded(true)}
+                                onError={() => setImgError(true)}
+                            />
+                        </Card>
+                    </Col>
+                );
+            };
+
+            return (
+                <Layout>
+                    <Header>
+                        <Row justify="space-between" align="middle">
+                            <Col>
+                                <Title level={3} style={{ color: '#1890ff', margin: 0 }}>🎥 NoMeeting</Title>
+                            </Col>
+                            <Col>
+                                <Space>
+                                    <Tag color={status.color}>{status.text}</Tag>
+                                    {!connected ? (
+                                        <Button type="primary" onClick={() => form.submit()} loading={loading}>
+                                            连接
+                                        </Button>
+                                    ) : (
+                                        <Button danger onClick={handleDisconnect} loading={loading}>
+                                            断开连接
+                                        </Button>
+                                    )}
+                                </Space>
+                            </Col>
+                        </Row>
+                    </Header>
+                    <Content>
+                        {!connected ? (
+                            <Row justify="center" align="middle" style={{ height: '100%' }}>
+                                <Col xs={24} sm={18} md={12} lg={8}>
+                                    <Card title="加入会议">
+                                        <Form
+                                            form={form}
+                                            layout="vertical"
+                                            onFinish={handleConnect}
+                                            initialValues={{
+                                                server_ws: 'ws://localhost:3001',
+                                                room_name: 'testroom',
+                                            }}
+                                        >
+                                            <Form.Item
+                                                name="server_ws"
+                                                label="服务器地址"
+                                                rules={[{ required: true, message: '请输入WebSocket服务器地址' }]}
+                                            >
+                                                <Input placeholder="e.g., ws://localhost:3001" />
+                                            </Form.Item>
+                                            <Form.Item
+                                                name="room_name"
+                                                label="房间名"
+                                                rules={[{ required: true, message: '请输入房间名' }]}
+                                            >
+                                                <Input placeholder="e.g., testroom" />
+                                            </Form.Item>
+                                        </Form>
+                                    </Card>
+                                </Col>
+                            </Row>
+                        ) : (
+                            <Spin spinning={loading && streams.length === 0}>
+                                {streams.length > 0 ? (
+                                    <Row gutter={[16, 16]}>
+                                        {streams.map(id => <StreamCard key={id} streamId={id} />)}
+                                    </Row>
+                                ) : (
+                                    <Empty description="暂无可用的视频流" />
+                                )}
+                            </Spin>
+                        )}
+                    </Content>
+                    <Footer>NoMeeting ©2024 Created with Ant Design</Footer>
+                </Layout>
+            );
+        };
+
+        const container = document.getElementById('root');
+        const root = ReactDOM.createRoot(container);
+        root.render(<App />);
+    </script>
+</body>
+</html>

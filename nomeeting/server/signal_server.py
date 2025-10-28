@@ -133,10 +133,6 @@ class SignalServer:
                         if client_id and sdp:
                             await self.media.set_answer(client_id, sdp)
 
-                    case "stream":
-                        # 客户端请求流
-                        pass
-
                     case _:
                         logging.info(f"非定义信令： {message}")
 
@@ -155,35 +151,20 @@ class SignalServer:
             self.clients_ws.discard(websocket)
     
     async def _cleanup_client(self, client_id: str):
-        """清理断线客户端的所有资源"""
+        """
+        Cleans up all resources for a disconnected client by calling the respective managers.
+        """
+        logging.info(f"[SignalServer] 开始清理客户端资源: {client_id}")
         try:
-            logging.info(f"开始清理客户端资源: {client_id}")
-            
-            # 1. 从所有房间移除
+            # 1. Remove client from all rooms
             self.room.left(client_id)
             
-            # 2. 关闭PeerConnection并清理媒体资源
-            client = self.media.get_client_by_id(client_id)
-            if client and client.pc:
-                try:
-                    await client.pc.close()
-                    logging.info(f"已关闭客户端{client_id}的PeerConnection")
-                except Exception as e:
-                    logging.warning(f"关闭PeerConnection失败: {e}")
+            # 2. Clean up all media resources (including closing PC)
+            await self.media.remove_client(client_id)
             
-            # 3. 从MediaManager移除
-            if client_id in self.media.clients:
-                del self.media.clients[client_id]
-                logging.info(f"已从MediaManager移除客户端: {client_id}")
-            
-            # 4. 从track注册表移除
-            if client_id in self.media.client_tracks:
-                del self.media.client_tracks[client_id]
-                logging.info(f"已从track注册表移除客户端: {client_id}")
-            
-            logging.info(f"客户端资源清理完成: {client_id}")
+            logging.info(f"[SignalServer] 客户端资源清理完成: {client_id}")
         except Exception as e:
-            logging.exception(f"清理客户端{client_id}资源时出错: {e}")
+            logging.exception(f"[SignalServer] 清理客户端 {client_id} 资源时出错: {e}")
 
     async def start(self):
         """

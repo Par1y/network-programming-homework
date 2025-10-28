@@ -19,13 +19,10 @@ class Client:
     """
     客户端类
 
-    `nickname: str` 客户端昵称
-
     `ws: any` 客户端websocket
 
     `pc: aiortc.RTCPeerConnection` 客户端RTC连接
     """
-    nickname: str
     ws: any
     pc: aiortc.RTCPeerConnection
 
@@ -78,7 +75,7 @@ class MediaManager:
             # 某些 aiortc 版本可能接受 dict 风格参数，回退到默认构造
             logging.exception("创建 RTCPeerConnection 时使用 RTCConfiguration 失败，回退到默认构造")
             pc = aiortc.RTCPeerConnection()
-        self.clients[client_id] = Client("", websocket, pc)
+        self.clients[client_id] = Client(websocket, pc)
         
         @pc.on("iceconnectionstatechange")
         def on_ice_connection_change():
@@ -147,6 +144,11 @@ class MediaManager:
                 if neighbor_id == client_id:
                     continue
                 
+                # 检查邻居连接状态，防止向已关闭的连接添加轨道
+                if neighbor.pc.connectionState in ("closed", "failed"):
+                    logging.warning(f"邻居 {neighbor_id} 的连接状态为 {neighbor.pc.connectionState}，跳过轨道转发")
+                    continue
+                
                 try:
                     rel_track = self.relay.subscribe(track)
                     # addTrack返回RTCRtpSender，需要通过getTransceivers获取transceiver
@@ -193,6 +195,13 @@ class MediaManager:
         if c is None:
             logging.warning(f"offer: 未找到 client_id={client_id}")
             raise ValueError("client 未注册")
+        
+        # --- 竞争条件修复 ---
+        # 如果信令状态不是 stable，说明服务器正在进行协商（例如，服务器刚刚发送了一个offer）
+        # 此时应忽略客户端的offer，以避免状态冲突。
+        if c.pc.signalingState != "stable":
+            logging.warning(f"忽略来自客户端 {client_id} 的offer，因为当前信令状态为 '{c.pc.signalingState}'（非 'stable'）")
+            return
 
         offer = aiortc.RTCSessionDescription(sdp=sdp, type="offer")
         await c.pc.setRemoteDescription(offer)
@@ -271,6 +280,26 @@ class MediaManager:
         if client_id in self.clients:
             return self.clients[client_id]
     
+    async def remove_client(self, client_id: str):
+        """Gracefully removes a client and cleans up all associated resources."""
+        logging.info(f"[MediaManager] 开始清理客户端: {client_id}")
+        client = self.clients.pop(client_id, None)
+        
+        if client:
+            logging.info(f"[MediaManager] 客户端 {client_id} 已从字典中移除。")
+            if client.pc and client.pc.connectionState != "closed":
+                try:
+                    await client.pc.close()
+                    logging.info(f"[MediaManager] 客户端 {client_id} 的 PeerConnection 已关闭。")
+                except Exception as e:
+                    logging.warning(f"[MediaManager] 关闭客户端 {client_id} 的 PeerConnection 时出错: {e}")
+        else:
+            logging.warning(f"[MediaManager] 尝试清理一个不存在的客户端: {client_id}")
+
+        # Remove from track registry
+        if self.client_tracks.pop(client_id, None):
+            logging.info(f"[MediaManager] 客户端 {client_id} 的 tracks 已从注册表中移除。")
+
     async def subscribe_existing_tracks(self, new_client_id: str, room_name: str, room_manager):
         """
         新客户端加入房间时，订阅房间内已有客户端的所有tracks

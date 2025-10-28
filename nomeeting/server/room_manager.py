@@ -76,10 +76,10 @@ class RoomManager:
                 for name in room_name:
                     if name == room.name and client_id in room.clients:
                         del room.clients[client_id]
-                        logging.info(f"{client_id} 离开房间 {name}。")
+                        logging.info(f"[RoomManager] 客户端 {client_id} 已从房间 {name} 移除。")
             return "success"
         except Exception as e:
-            logging.warning(f"{client_id} 退出房间 出错！ {e}")
+            logging.warning(f"[RoomManager] 客户端 {client_id} 退出房间时出错: {e}")
             return "无法退出 房间列表"
 
     def get_neighbors(self, client_id: str) -> dict:
