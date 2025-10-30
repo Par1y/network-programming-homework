@@ -1,0 +1,45 @@
+body {
+    font-family: sans-serif;
+    margin: 0;
+    padding: 20px;
+    background-color: #f0f0f0;
+}
+
+#_title {
+    text-align: center;
+    color: darkblue;
+}
+
+#income_msg, #out_msg {
+    margin-bottom: 15px;
+    padding: 10px;
+    border-radius: 8px;
+    max-width: 70%;
+    word-wrap: break-word;
+}
+
+#income_msg {
+    background-color: #fff;
+    border: 1px solid #ddd;
+    align-self: flex-start;
+}
+
+#out_msg {
+    background-color: #dcf8c6;
+    border: 1px solid #cde6b8;
+    align-self: flex-end;
+    margin-left: auto;
+}
+
+#time {
+    color: grey;
+}
+
+#uid {
+    color: brown;
+}
+
+.message-container {
+    display: flex;
+    flex-direction: column;
+}

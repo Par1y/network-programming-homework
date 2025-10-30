@@ -3,6 +3,7 @@ import websockets
 import asyncio
 import logging
 import mistune
+import time
 from dominate.tags import *
 from dominate import document
 from dominate.util import raw
@@ -33,8 +34,10 @@ class Talk:
         try:
             async for message in websocket:
                 msg = mistune.html(message)
-                print("\n" + str(websocket.id) + "  " + msg + "\n输入你想说的内容（两个空行结束）: ", end="", flush=True)
-                self.d.body.add(div(id='income_msg')).add(raw(msg))
+                # print("\n" + str(websocket.id) + "  " + msg + "\n输入你想说的内容（两个空行结束）: ", end="", flush=True)
+                id = websocket.id
+                localtime = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+                self.d.body.add(div(raw(f'<a id="time">{localtime}  </a><a id="uid">{id}</a>: {msg}'), id='income_msg'))
                 with open(self.output_file, "w", encoding="utf-8") as f:
                     f.write(self.d.render())
         except Exception as e:
@@ -55,7 +58,7 @@ class Talk:
         run client
         """
         try:
-            addr = await asyncio.to_thread(input, "对方地址(ws://host:port)： ")
+            addr = await asyncio.to_thread(input, "输入对方地址(ws://host:port)： ")
 
             async with websockets.connect(addr) as websocket:
                 self.is_connected = True
@@ -64,7 +67,7 @@ class Talk:
                 cnt: int = 0
                 while self.go:
                     if self.is_connected:
-                        print("\n输入你想说的内容（两个空行结束）: ", end="", flush=True)
+                        print("\n输入你想说的内容（两个空行发送）: ", end="", flush=True)
                         input_data = await loop.run_in_executor(None, sys.stdin.readline)
                         if not input_data:
                             self.go = False
@@ -73,6 +76,12 @@ class Talk:
                         if cnt == 2:
                             if lines:
                                 message = "".join(lines).strip()
+                                logging.info(f"已发送 {message}")
+                                msg = mistune.html(message)
+                                localtime = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+                                self.d.body.add(div(raw(f'<a id="time">{localtime}</a> {msg}'), id='out_msg'))
+                                with open(self.output_file, "w", encoding="utf-8") as f:
+                                    f.write(self.d.render())
                                 await websocket.send(message)
                             cnt = 0
                             lines.clear()
@@ -84,7 +93,8 @@ class Talk:
 
 async def main():
     d = document()
-    d += h1('Chatflow')
+    d.head += link(rel="stylesheet", href="style.css")
+    d += h1('NoChat', id='_title')
     talk = Talk("0.0.0.0", port=3000, document=d, output_file="chat.html")
     listen = asyncio.create_task(talk.listen())
     conn = asyncio.create_task(talk.conn())
