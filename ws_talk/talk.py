@@ -2,6 +2,10 @@ import sys
 import websockets
 import asyncio
 import logging
+import mistune
+from dominate.tags import *
+from dominate import document
+from dominate.util import raw
 
 # 日志
 logging.basicConfig(
@@ -14,11 +18,13 @@ class Talk:
     """
     ws聊天
     """
-    def __init__(self, host="localhost", port=5500):
+    def __init__(self, host="localhost", port=5500, document=document(), output_file="chat.html"):
         self.host = host
         self.port = port
         self.go = True
         self.is_connected = False
+        self.d = document
+        self.output_file = output_file
 
     async def handle_peer(self, websocket: websockets):
         """
@@ -26,7 +32,11 @@ class Talk:
         """
         try:
             async for message in websocket:
-                print("\n" + str(websocket.id) + "  " + message + "\nwhat can i say: ", end="", flush=True)
+                msg = mistune.html(message)
+                print("\n" + str(websocket.id) + "  " + msg + "\n输入你想说的内容（两个空行结束）: ", end="", flush=True)
+                self.d.body.add(div(id='income_msg')).add(raw(msg))
+                with open(self.output_file, "w", encoding="utf-8") as f:
+                    f.write(self.d.render())
         except Exception as e:
             logging.error(f"{e}")
         finally:
@@ -50,22 +60,32 @@ class Talk:
             async with websockets.connect(addr) as websocket:
                 self.is_connected = True
                 loop = asyncio.get_running_loop()
-                reader = asyncio.StreamReader()
-                await loop.connect_read_pipe(lambda: asyncio.StreamReaderProtocol(reader), sys.stdin)
+                lines = []
+                cnt: int = 0
                 while self.go:
                     if self.is_connected:
-                        print("\nwhat can i say: ", end="", flush=True)
-                        line = await reader.readline()
-                        if not line:
-                            break
-                        message = line.decode().strip()
-                        await websocket.send(message)
+                        print("\n输入你想说的内容（两个空行结束）: ", end="", flush=True)
+                        input_data = await loop.run_in_executor(None, sys.stdin.readline)
+                        if not input_data:
+                            self.go = False
+                        if input_data == '\n':
+                            cnt += 1
+                        if cnt == 2:
+                            if lines:
+                                message = "".join(lines).strip()
+                                await websocket.send(message)
+                            cnt = 0
+                            lines.clear()
+                        lines.append(input_data)
+                    
         except Exception as e:
             logging.error(f"{e}")
 
 
 async def main():
-    talk = Talk("0.0.0.0", port=3000)
+    d = document()
+    d += h1('Chatflow')
+    talk = Talk("0.0.0.0", port=3000, document=d, output_file="chat.html")
     listen = asyncio.create_task(talk.listen())
     conn = asyncio.create_task(talk.conn())
     await asyncio.gather(listen, conn)
