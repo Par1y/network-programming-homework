@@ -17,7 +17,6 @@ class Talk:
     def __init__(self, host="localhost", port=5500):
         self.host = host
         self.port = port
-        self.buffer = []
         self.go = True
         self.is_connected = False
 
@@ -27,7 +26,7 @@ class Talk:
         """
         try:
             async for message in websocket:
-                print("\n" + message + "\nwhat can i say: ", end="", flush=True)
+                print("\n" + str(websocket.id) + "  " + message + "\nwhat can i say: ", end="", flush=True)
         except Exception as e:
             logging.error(f"{e}")
         finally:
