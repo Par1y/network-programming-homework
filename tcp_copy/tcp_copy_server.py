@@ -73,6 +73,9 @@ def main():
         port = int(input("请输入端口： "))
         link_limit = int(input("请输入最大连接数： "))
         password = str(input("口令（留空不设置）： "))
+        sha256 = hashlib.sha256()
+        sha256.update(password.encode('utf-8'))
+        en_pw = sha256.hexdigest()
         s_socket.bind(('0.0.0.0', port))
         s_socket.listen(link_limit)
         s_socket.setblocking(False)
@@ -93,7 +96,7 @@ def main():
             # 建立连接
             x_socket,addr = s_socket.accept()
             pw = json.loads(x_socket.recv(1024).decode('utf-8'))
-            if password and pw != password:
+            if en_pw and pw != en_pw:
                 raise ConnectionAbortedError
             files = json.dumps(os.listdir(save_dir))
             x_socket.send(files.encode('utf-8'))
@@ -130,9 +133,11 @@ def main():
     s_socket.close()
     for t in thread_pool:
         t.join()
+        logging.info(f"在主线程清理中关闭套接字: {t.socket.getpeername()}")
         t.socket.close()
 
 def release(socket: socket):
+    logging.warning(f"在异常处理中关闭套接字: {socket.getpeername()}")
     socket.close()
 
 if __name__ == "__main__":

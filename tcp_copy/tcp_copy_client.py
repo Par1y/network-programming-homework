@@ -43,7 +43,10 @@ def main():
     try:
         c_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         c_socket.connect((host, port))
-        c_socket.send(json.dumps(password).encode('utf-8'))
+        sha256 = hashlib.sha256()
+        sha256.update(password.encode('utf-8'))
+        en_pw = sha256.hexdigest()
+        c_socket.send(json.dumps(en_pw).encode('utf-8'))
         files = json.loads(c_socket.recv(1024))
         print("\n" + "="*30)
         print("      文件列表")
