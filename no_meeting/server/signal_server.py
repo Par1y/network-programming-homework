@@ -72,17 +72,19 @@ class SignalServer:
                                         if neighbor_tracks:
                                             has_existing_tracks = True
                                             break
-                            
-                            # 必须先发送join_success，再调用subscribe_existing_tracks
-                            # 这样客户端才能在收到服务器offer之前知道服务器会发送offer
+                            # 先发送join_success，这样客户端才能在收到服务器offer之前知道服务器会发送offer
                             ack = json.dumps({
                                 "type": "join_success",
                                 "server_will_offer": has_existing_tracks
                             })
                             await websocket.send(ack)
                             
-                            # 发送join_success后，再订阅房间内已有的流（这会发送offer）
+                            # 此时客户端等待服务器offer，再订阅房间内已有的流
                             await self.media.subscribe_existing_tracks(client_id, room_name, self.room)
+                            
+                            # 触发 joined_event，允许 on_track 中的转发任务继续执行
+                            client.joined_event.set()
+                            logging.info(f"客户端 {client_id} 的 joined_event 已触发")
                         else:
                             ack = json.dumps({ "type": "join_failed", "msg": ack })
                             await websocket.send(ack)
@@ -127,7 +129,7 @@ class SignalServer:
                         logging.info(f"已向客户端 {client_id} 发送answer")
 
                     case "answer":
-                        # 客户端对服务器发起的 offer 的 answer（协商响应）
+                        # 客户端对服务器发起的 offer 的 answer
                         client_id = msg.get("client_id")
                         sdp = msg.get("sdp")
                         if client_id and sdp:
@@ -152,19 +154,16 @@ class SignalServer:
     
     async def _cleanup_client(self, client_id: str):
         """
-        Cleans up all resources for a disconnected client by calling the respective managers.
+        委托 MediaManager 和 RoomManager 清理客户端资源。
         """
-        logging.info(f"[SignalServer] 开始清理客户端资源: {client_id}")
+        logging.critical(f"--- 根本原因诊断 --- [SignalServer] 准备为客户端 {client_id} 调用 remove_client。触发源：WebSocket关闭或异常。")
+        logging.info(f"[SignalServer] 委托清理客户端资源: {client_id}")
         try:
-            # 1. Remove client from all rooms
-            self.room.left(client_id)
-            
-            # 2. Clean up all media resources (including closing PC)
             await self.media.remove_client(client_id)
-            
-            logging.info(f"[SignalServer] 客户端资源清理完成: {client_id}")
+
+            logging.info(f"[SignalServer] 客户端 {client_id} 的资源委托清理完成。")
         except Exception as e:
-            logging.exception(f"[SignalServer] 清理客户端 {client_id} 资源时出错: {e}")
+            logging.exception(f"[SignalServer] 委托清理客户端 {client_id} 资源时出错: {e}")
 
     async def start(self):
         """

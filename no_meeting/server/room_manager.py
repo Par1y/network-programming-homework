@@ -63,24 +63,36 @@ class RoomManager:
         r.clients[client_id] = client
         return "success"
 
-    def left(self, client_id: str, room_name: list[str]=None) -> str:
-        """ 
-        离开房间
+    def left(self, client_id: str, room_name: str | list[str] = None) -> str:
+        """
+        离开一个或多个房间。
 
-        `MediaManager` 断线自动处理调用未带`room_name`，故默认所有房间
+        丑陋多态
         """
         try:
+            rooms_to_leave = []
             if room_name is None:
-                room_name = self.get_rooms()
-            for room in self.rooms:
-                for name in room_name:
-                    if name == room.name and client_id in room.clients:
-                        del room.clients[client_id]
-                        logging.info(f"[RoomManager] 客户端 {client_id} 已从房间 {name} 移除。")
+                # 检查所有房间
+                rooms_to_leave = self.get_rooms()
+            elif isinstance(room_name, str):
+                # 检查单个房间
+                rooms_to_leave = [room_name]
+            elif isinstance(room_name, list):
+                # 检查多个房间
+                rooms_to_leave = room_name
+            else:
+                logging.warning(f"无效的 room_name 类型: {type(room_name)}")
+                return "无效的房间名类型"
+
+            for r in self.rooms:
+                if r.name in rooms_to_leave:
+                    if client_id in r.clients:
+                        del r.clients[client_id]
+                        logging.info(f"[RoomManager] 客户端 {client_id} 已从房间 {r.name} 移除。")
             return "success"
         except Exception as e:
             logging.warning(f"[RoomManager] 客户端 {client_id} 退出房间时出错: {e}")
-            return "无法退出 房间列表"
+            return "无法退出房间"
 
     def get_neighbors(self, client_id: str) -> dict:
         """

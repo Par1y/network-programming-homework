@@ -1,5 +1,4 @@
 import aiortc
-import os
 from aiortc import RTCConfiguration, RTCIceServer
 from dataclasses import dataclass
 import json
@@ -25,6 +24,8 @@ class Client:
     """
     ws: any
     pc: aiortc.RTCPeerConnection
+    lock: asyncio.Lock
+    joined_event: asyncio.Event
 
 class MediaManager:
     """
@@ -40,7 +41,6 @@ class MediaManager:
         # 保存后台任务引用，防止被垃圾回收
         self._background_tasks = []
         # Track注册表：记录每个客户端的所有tracks
-        # 格式: { client_id: [track1, track2, ...] }
         self.client_tracks = {}
         default_ices = [
             "stun:stun.l.google.com:19302",
@@ -60,6 +60,10 @@ class MediaManager:
         self.ice_servers = [RTCIceServer(urls=[u]) for u in urls]
         # 用于转发单一源 track 到多个 PeerConnection
         self.relay = MediaRelay()
+        # 用于追踪转发的轨道: { source_client_id: { neighbor_id: [sender, ...] } }
+        self.forwarded_tracks = {}
+        # 用于处理并发协商
+        self.pending_renegotiation = {}
 
     def register(self, client_id: str, websocket: any):
         """
@@ -72,10 +76,9 @@ class MediaManager:
             config = RTCConfiguration(iceServers=self.ice_servers)
             pc = aiortc.RTCPeerConnection(configuration=config)
         except Exception:
-            # 某些 aiortc 版本可能接受 dict 风格参数，回退到默认构造
             logging.exception("创建 RTCPeerConnection 时使用 RTCConfiguration 失败，回退到默认构造")
             pc = aiortc.RTCPeerConnection()
-        self.clients[client_id] = Client(websocket, pc)
+        self.clients[client_id] = Client(websocket, pc, asyncio.Lock(), asyncio.Event())
         
         @pc.on("iceconnectionstatechange")
         def on_ice_connection_change():
@@ -85,13 +88,15 @@ class MediaManager:
                 logging.warning(f"ICE连接失败 (client_id={client_id})")
 
         @pc.on("connectionstatechange")
-        def on_connection_state_change():
+        async def on_connection_state_change():
             """
-            断线处理
+            监控连接状态变化，断开直接扬了。
             """
-            if pc.connectionState == "failed":
-                _ack = self.room.left(client_id)
-                pc.close()
+            logging.info(f"客户端 {client_id} 连接状态变为: {pc.connectionState}")
+            if pc.connectionState in ("failed", "closed"):
+                logging.warning(f"客户端 {client_id} 的 PeerConnection 状态变为 '{pc.connectionState}'，立即触发清理。")
+                # 使用 create_task 在后台执行清理，以避免阻塞当前回调
+                _task = asyncio.create_task(self.remove_client(client_id))
 
         @pc.on("icecandidate")
         def on_ice_candidate(candidate: any):
@@ -113,7 +118,7 @@ class MediaManager:
                 task = asyncio.create_task(websocket.send(ice_msg))
                 self._background_tasks.append(task)
             except Exception:
-                logging.exception("发送 ICE candidate 失败")
+                logging.warning(f"向客户端 {client_id} 发送 ICE candidate 失败，可能已断开连接。")
 
         @pc.on("track")
         def on_track(track: any):
@@ -124,7 +129,7 @@ class MediaManager:
             
             current_client = self.clients.get(client_id)
             if not current_client:
-                logging.warning(f"未找到客户端 (client_id={client_id})")
+                logging.warning(f"on_track: 未找到客户端 (client_id={client_id})")
                 return
             
             # 将track注册到track注册表
@@ -132,60 +137,81 @@ class MediaManager:
                 self.client_tracks[client_id] = []
             self.client_tracks[client_id].append(track)
             logging.info(f"客户端 {client_id} 现有 {len(self.client_tracks[client_id])} 个track")
-            
-            neighbors = self.room.get_neighbors(client_id)
-            logging.info(f"客户端 {client_id} 的邻居数量: {len(neighbors) if neighbors else 0}")
-            
-            if not neighbors:
-                logging.warning(f"客户端 {client_id} 没有邻居，track已注册但未转发")
-                return
-            
-            for neighbor_id, neighbor in neighbors.items():
-                if neighbor_id == client_id:
-                    continue
+
+            # 每加入一个新的客户还要重新通知一次 信令触发Event信号这里处理
+            async def forward_track_after_join():
+                logging.info(f"等待客户端 {client_id} 的 joined_event 信号...")
+                await current_client.joined_event.wait()
+                logging.info(f"客户端 {client_id} joined_event 已触发，开始转发track")
+
+                neighbors = self.room.get_neighbors(client_id)
+                logging.info(f"客户端 {client_id} 的邻居数量: {len(neighbors) if neighbors else 0}")
                 
-                # 检查邻居连接状态，防止向已关闭的连接添加轨道
-                if neighbor.pc.connectionState in ("closed", "failed"):
-                    logging.warning(f"邻居 {neighbor_id} 的连接状态为 {neighbor.pc.connectionState}，跳过轨道转发")
-                    continue
+                if not neighbors:
+                    logging.warning(f"客户端 {client_id} 没有邻居，track已注册但未转发")
+                    return
                 
-                try:
-                    rel_track = self.relay.subscribe(track)
-                    # addTrack返回RTCRtpSender，需要通过getTransceivers获取transceiver
-                    sender = neighbor.pc.addTrack(rel_track)
+                for neighbor_id, neighbor in neighbors.items():
+                    if neighbor_id == client_id:
+                        continue
                     
-                    # 获取刚添加的transceiver（最后一个）
-                    transceivers = neighbor.pc.getTransceivers()
-                    if transceivers:
-                        transceiver = transceivers[-1]
-                        # 设置direction为sendonly（服务器向客户端发送）
-                        transceiver._direction = "sendonly"
+                    if neighbor.pc.connectionState in ("closed", "failed"):
+                        logging.warning(f"邻居 {neighbor_id} 的连接状态为 {neighbor.pc.connectionState}，跳过轨道转发")
+                        continue
                     
-                    logging.info(f"已转发 track 到邻居 {neighbor_id}")
-                    
-                    # 添加track后需要重新协商
-                    async def renegotiate():
-                        try:
-                            offer = await neighbor.pc.createOffer()
-                            await neighbor.pc.setLocalDescription(offer)
-                            # 等待ICE gathering完成
-                            await asyncio.sleep(1.0)
-                            
-                            offer_msg = json.dumps({
-                                "type": "offer",
-                                "client_id": neighbor_id,
-                                "sdp": offer.sdp
-                            })
-                            await neighbor.ws.send(offer_msg)
-                            logging.info(f"重新协商完成 (neighbor_id={neighbor_id})")
-                        except Exception as e:
-                            logging.warning(f"重新协商失败 (neighbor_id={neighbor_id}): {e}")
-                    
-                    task = asyncio.create_task(renegotiate())
-                    self._background_tasks.append(task)
-                    
-                except Exception:
-                    logging.exception(f"转发 track 失败 (neighbor_id={neighbor_id})")
+                    try:
+                        rel_track = self.relay.subscribe(track)
+                        sender = neighbor.pc.addTrack(rel_track)
+                        
+                        if client_id not in self.forwarded_tracks:
+                            self.forwarded_tracks[client_id] = {}
+                        if neighbor_id not in self.forwarded_tracks[client_id]:
+                            self.forwarded_tracks[client_id][neighbor_id] = []
+                        self.forwarded_tracks[client_id][neighbor_id].append(sender)
+
+                        transceivers = neighbor.pc.getTransceivers()
+                        if transceivers:
+                            transceivers[-1]._direction = "sendonly"
+                        
+                        logging.info(f"已转发 track 从 {client_id} 到邻居 {neighbor_id}")
+                        
+                        if neighbor_id not in self.pending_renegotiation:
+                            async def debounced_renegotiate():
+                                await asyncio.sleep(0.2)
+                                self.pending_renegotiation.pop(neighbor_id, None)
+                                
+                                neighbor_client = self.clients.get(neighbor_id)
+                                if not neighbor_client or neighbor_client.pc.connectionState in ("closed", "failed"):
+                                    logging.warning(f"邻居 {neighbor_id} 已断开，取消协商。")
+                                    return
+
+                                logging.info(f"开始为邻居 {neighbor_id} 进行重新协商。")
+                                if neighbor_client.pc.signalingState == "stable":
+                                    try:
+                                        offer = await neighbor_client.pc.createOffer()
+                                        await neighbor_client.pc.setLocalDescription(offer)
+                                        
+                                        offer_msg = json.dumps({
+                                            "type": "offer",
+                                            "sdp": offer.sdp
+                                        })
+                                        await neighbor_client.ws.send(offer_msg)
+                                        logging.info(f"已向邻居 {neighbor_id} 发送Offer。")
+                                    except Exception as e:
+                                        logging.exception(f"为邻居 {neighbor_id} 发送Offer失败: {e}")
+                                else:
+                                    logging.warning(f"邻居 {neighbor_id} 的信令状态为 {neighbor_client.pc.signalingState}，跳过防抖动的重新协商。")
+
+                            task = asyncio.create_task(debounced_renegotiate())
+                            self.pending_renegotiation[neighbor_id] = task
+                            self._background_tasks.append(task)
+                        
+                    except Exception:
+                        logging.exception(f"转发 track 失败 (neighbor_id={neighbor_id})")
+
+            # 总之异步防止阻塞
+            task = asyncio.create_task(forward_track_after_join())
+            self._background_tasks.append(task)
 
     async def offer(self, client_id: str, sdp: any) -> str:
         """
@@ -196,8 +222,7 @@ class MediaManager:
             logging.warning(f"offer: 未找到 client_id={client_id}")
             raise ValueError("client 未注册")
         
-        # --- 竞争条件修复 ---
-        # 如果信令状态不是 stable，说明服务器正在进行协商（例如，服务器刚刚发送了一个offer）
+        # 如果信令状态不是 stable，说明服务器正在进行协商
         # 此时应忽略客户端的offer，以避免状态冲突。
         if c.pc.signalingState != "stable":
             logging.warning(f"忽略来自客户端 {client_id} 的offer，因为当前信令状态为 '{c.pc.signalingState}'（非 'stable'）")
@@ -205,20 +230,6 @@ class MediaManager:
 
         offer = aiortc.RTCSessionDescription(sdp=sdp, type="offer")
         await c.pc.setRemoteDescription(offer)
-
-        # 在创建answer前检查并修复transceivers的direction
-        for i, t in enumerate(c.pc.getTransceivers()):
-            direction = getattr(t, '_direction', None)
-            
-            # 如果direction为None，尝试修复
-            if direction is None:
-                sender = getattr(t, 'sender', None)
-                if sender and sender.track:
-                    t._direction = "sendonly"
-                    logging.debug(f"修复Transceiver[{i}]的direction为sendonly")
-                else:
-                    t._direction = "recvonly"
-                    logging.debug(f"修复Transceiver[{i}]的direction为recvonly")
 
         # 生成SDP Answer
         try:
@@ -281,39 +292,96 @@ class MediaManager:
             return self.clients[client_id]
     
     async def remove_client(self, client_id: str):
-        """Gracefully removes a client and cleans up all associated resources."""
-        logging.info(f"[MediaManager] 开始清理客户端: {client_id}")
-        client = self.clients.pop(client_id, None)
-        
-        if client:
-            logging.info(f"[MediaManager] 客户端 {client_id} 已从字典中移除。")
-            if client.pc and client.pc.connectionState != "closed":
+        """
+        清理
+        """
+        client_to_remove = self.clients.get(client_id)
+        if not client_to_remove:
+            logging.info(f"[MediaManager] 客户端 {client_id} 已被清理，跳过重复操作。")
+            return
+
+        async with client_to_remove.lock:
+            # 已经被其他协程清理
+            if client_id not in self.clients:
+                logging.info(f"[MediaManager] 客户端 {client_id} 在获取锁后发现已被清理，跳过。")
+                return
+            
+            logging.info(f"[MediaManager] 开始清理客户端: {client_id}")
+
+
+            # 所有流爬
+            forwarded_from_client = self.forwarded_tracks.pop(client_id, {})
+            if forwarded_from_client:
+                logging.info(f"开始通知 {len(forwarded_from_client)} 个邻居停止接收来自 {client_id} 的轨道。")
+                for neighbor_id, senders_to_remove in forwarded_from_client.items():
+                    neighbor_client = self.clients.get(neighbor_id)
+                    if not neighbor_client or neighbor_client.pc.connectionState in ("closed", "failed"):
+                        logging.warning(f"邻居 {neighbor_id} 连接已关闭或不存在，跳过轨道停止。")
+                        continue
+
+                    removed_count = 0
+                    for sender in senders_to_remove:
+                        if sender and sender.track:
+                            # 草，发送者id
+                            track_id = sender.track.id
+                            
+                            # 有人死了！！！
+                            try:
+                                end_msg = json.dumps({"type": "track_ended", "track_id": track_id})
+                                asyncio.create_task(neighbor_client.ws.send(end_msg))
+                                logging.info(f"已向邻居 {neighbor_id} 发送 track_ended 信号 (track_id: {track_id})")
+                            except Exception as e:
+                                logging.warning(f"向邻居 {neighbor_id} 发送 track_ended 信号失败: {e}")
+
+                            # 别发了
+                            try:
+                                sender.replaceTrack(None)
+                                removed_count += 1
+                            except Exception as e:
+                                logging.warning(f"从邻居 {neighbor_id} 停止轨道时出错: {e}")
+                        else:
+                            # 异常情况处理
+                            try:
+                                if sender:
+                                    sender.replaceTrack(None)
+                                    removed_count += 1
+                            except Exception as e:
+                                logging.warning(f"从邻居 {neighbor_id} 停止一个未知轨道时出错: {e}")
+
+                    if removed_count > 0:
+                        logging.info(f"已停止向邻居 {neighbor_id} 发送 {removed_count} 个轨道。")
+
+            # 该客户为目标的流爬
+            for source_id in list(self.forwarded_tracks.keys()):
+                if client_id in self.forwarded_tracks.get(source_id, {}):
+                    self.forwarded_tracks[source_id].pop(client_id)
+                    logging.info(f"已清理从 {source_id} 到 {client_id} 的转发记录。")
+
+            # PC爬
+            if client_to_remove.pc.connectionState != "closed":
                 try:
-                    await client.pc.close()
+                    await client_to_remove.pc.close()
                     logging.info(f"[MediaManager] 客户端 {client_id} 的 PeerConnection 已关闭。")
                 except Exception as e:
                     logging.warning(f"[MediaManager] 关闭客户端 {client_id} 的 PeerConnection 时出错: {e}")
-        else:
-            logging.warning(f"[MediaManager] 尝试清理一个不存在的客户端: {client_id}")
 
-        # Remove from track registry
-        if self.client_tracks.pop(client_id, None):
-            logging.info(f"[MediaManager] 客户端 {client_id} 的 tracks 已从注册表中移除。")
+            # 滚出去
+            if self.clients.pop(client_id, None):
+                logging.info(f"[MediaManager] 客户端 {client_id} 已从字典中移除。")
+            
+            if self.client_tracks.pop(client_id, None):
+                logging.info(f"[MediaManager] 客户端 {client_id} 的 tracks 已从注册表中移除。")
+            
+            # 爬爬爬
+            self.room.left(client_id)
+            logging.info(f"[MediaManager] 已通知 RoomManager 客户端 {client_id} 离开。")
 
     async def subscribe_existing_tracks(self, new_client_id: str, room_name: str, room_manager):
         """
         新客户端加入房间时，订阅房间内已有客户端的所有tracks
-        
-        关键流程：
-        1. 从track注册表获取已有客户端的tracks
-        2. 使用MediaRelay转发这些tracks到新客户端的PeerConnection
-        3. 服务器主动发起offer，让新客户端知道有远端流可接收
-        4. 新客户端接收offer，创建answer并发回
-        
-        Args:
-            new_client_id: 新加入的客户端ID
-            room_name: 房间名称
-            room_manager: RoomManager实例，用于获取房间内的其他客户端
+        `new_client_id`: 新加入的客户端ID
+        `room_name`: 房间名称
+        `room_manager`: RoomManager实例，用于获取房间内的其他客户端
         """
         new_client = self.clients.get(new_client_id)
         if not new_client:
@@ -350,6 +418,13 @@ class MediaManager:
                     
                     # addTrack返回RTCRtpSender，需要通过getTransceivers获取transceiver
                     sender = new_client.pc.addTrack(rel_track)
+
+                    # 注册转发轨道，确保清理时能正确通知
+                    if neighbor_id not in self.forwarded_tracks:
+                        self.forwarded_tracks[neighbor_id] = {}
+                    if new_client_id not in self.forwarded_tracks[neighbor_id]:
+                        self.forwarded_tracks[neighbor_id][new_client_id] = []
+                    self.forwarded_tracks[neighbor_id][new_client_id].append(sender)
                     
                     # 获取刚添加的transceiver（最后一个）并设置direction
                     transceivers = new_client.pc.getTransceivers()
@@ -383,6 +458,6 @@ class MediaManager:
                 await new_client.ws.send(offer_msg)
                 logging.info(f"已向新客户端 {new_client_id} 发送offer（包含 {tracks_added} 个远端track）")
             except Exception as e:
-                logging.exception(f"为新客户端 {new_client_id} 发起offer失败: {e}")
+                logging.warning(f"为新客户端 {new_client_id} 发起offer失败，可能已断开连接: {e}")
         else:
             logging.info(f"新客户端 {new_client_id} 没有需要订阅的track")
