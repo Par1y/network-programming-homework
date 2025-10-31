@@ -72,6 +72,7 @@ def main():
         save_dir = str(input("请输入文件目录： "))
         port = int(input("请输入端口： "))
         link_limit = int(input("请输入最大连接数： "))
+        password = str(input("口令（留空不设置）： "))
         s_socket.bind(('0.0.0.0', port))
         s_socket.listen(link_limit)
         s_socket.setblocking(False)
@@ -91,6 +92,9 @@ def main():
         try:
             # 建立连接
             x_socket,addr = s_socket.accept()
+            pw = json.loads(x_socket.recv(1024).decode('utf-8'))
+            if password and pw != password:
+                raise ConnectionAbortedError
             files = json.dumps(os.listdir(save_dir))
             x_socket.send(files.encode('utf-8'))
             u_data = json.loads(x_socket.recv(1024).decode('utf-8'))
@@ -111,16 +115,25 @@ def main():
             continue
         except ConnectionResetError as e:
             logging.error(f"与 {addr} 连接中断 {e}")
+            release(x_socket)
         except TimeoutError as e:
             logging.error(f"与 {addr} 连接超时 {e}")
+            release(x_socket)
+        except ConnectionAbortedError as e:
+            logging.error(f"与 {addr} 验证失败 {e}")
+            release(x_socket)
         except Exception as e:
             logging.error(f"与 {addr} 连接故障 {e}")
+            release(x_socket)
 
     # 清理
     s_socket.close()
     for t in thread_pool:
         t.join()
         t.socket.close()
+
+def release(socket: socket):
+    socket.close()
 
 if __name__ == "__main__":
     main()

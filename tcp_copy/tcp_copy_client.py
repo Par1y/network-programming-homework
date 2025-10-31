@@ -33,6 +33,7 @@ def checksum(file, block_size, file_checksum):
 def main():
     file_path = input("请输入储存文件路径： ")
     addr = input("请输入目标服务器地址端口（host:port）： ")
+    password = input("请输入口令（无口令留空）： ")
     addr_split = re.split(r"[:：]", addr)
     host = addr_split[0]
     port = int(addr_split[1])
@@ -42,9 +43,16 @@ def main():
     try:
         c_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         c_socket.connect((host, port))
+        c_socket.send(json.dumps(password).encode('utf-8'))
         files = json.loads(c_socket.recv(1024))
-        logging.info(f"文件列表： {files}\n")
-        file = str(input("请输入需下载文件名： "))
+        print("\n" + "="*30)
+        print("      文件列表")
+        print("="*30)
+        for i, f in enumerate(files):
+            print(f"  {i+1}. {f}")
+        print("="*30)
+        file_index = int(input("请输入需下载文件序号： ")) - 1
+        file = files[file_index]
         msg = {"name":file, "block_size":block_size}
         pre_json = json.dumps(msg)
         c_socket.send(pre_json.encode('utf-8'))
